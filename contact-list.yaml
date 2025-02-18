@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  CloudFormation Template for Contact List Application
+Parameters:
+  Instance:
+    Description: Enter t2.micro, m1.small, or m1.large. Default is t2.micro.
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - m1.small
+      - m1.large
+  Keyname:
+    Description: Enter your key name  
+    Type: AWS::EC2::KeyPair::KeyName
+  
+  VPC:
+    Description: Enter Your VPC
+    Type: AWS::EC2::VPC::Id
+  
+  Subnets:
+    Description: Please select your subnets used by ALB
+    Type: List<AWS::EC2::Subnet::Id>
+ 
+  HostedZoneName:
+    Description: Route53 Hostedzone
+    Type: String
+    Default: "devopsaydintokuslu.de."
+
+Resources:
+  ALBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: allow http for ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      
+  InstanceSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: allow http and ssh for EC2
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !GetAtt ALBSecGroup.GroupId
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      
+  DBSecGrp:
+    Type: AWS::RDS::DBSecurityGroup
+    Properties:
+      DBSecurityGroupIngress: # Required
+        - EC2SecurityGroupId: !GetAtt InstanceSecGroup.GroupId
+      GroupDescription: "Database" # Required
+       
+  InstanceLT:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-0cff7528ff583bf9a
+        InstanceType: t2.micro
+        KeyName: !Ref Keyname
+        SecurityGroupIds:
+          - !GetAtt InstanceSecGroup.GroupId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub Web Server of ${AWS::StackName} Stack
+        UserData:
+          Fn::Base64:
+            !Sub 
+              - |
+                #! /bin/bash
+                yum update -y
+                yum install python3 -y
+                yum install git -y
+                pip3 install flask
+                pip3 install flask_mysql
+                echo "${MyDBURI}" > /home/ec2-user/dbserver.endpoint
+                cd /home/ec2-user
+                git clone https://github.com/AydinTokuslu/contact-list-project.git
+                cd contact-list-project
+                python3 contact-list-app.py
+              - MyDBURI: !GetAtt RDSDB.Endpoint.Address
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      SecurityGroups: 
+        -  !GetAtt ALBSecGroup.GroupId
+      Subnets: !Ref Subnets
+      Type: application
+
+  EC2TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthyThresholdCount: 2
+      Name: "contactlist-tg"
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VPC
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref EC2TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+  ASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones: 
+        !GetAZs ""
+      DesiredCapacity: 2
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref InstanceLT
+        Version: !GetAtt InstanceLT.LatestVersionNumber
+      MaxSize: 3 # Required
+      MinSize: 1 # Required
+      TargetGroupARNs: 
+        - !Ref EC2TargetGroup
+
+  RDSDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: false
+      BackupRetentionPeriod: 0
+      DBInstanceClass: db.t3.micro
+      DBInstanceIdentifier: techpro-database2
+      DBName: contactlist
+      DBSecurityGroups: 
+        - !Ref DBSecGrp
+      Engine: MySQL
+      EngineVersion: 8.0.35
+      MasterUserPassword: admin12345
+      MasterUsername: admin
+      MaxAllocatedStorage: 20
+      Port: 3306
+      PubliclyAccessible: true
+
+  ALBAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Ref HostedZoneName
+      Name: "contactlist.devopsaydintokuslu.de." 
+      Type: A  # ALB için A kaydı kullanılır
+      AliasTarget:
+        DNSName: !GetAtt ALB.DNSName
+        HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+
+
+Outputs:
+  LoadBalancerDNSName:
+    Value: !GetAtt ALB.DNSName
+    Description: The DNS name of the load balancer
+    Export:
+      Name: LoadBalancerDNSName
+  AlbCanonicalHostedZoneID:
+    Value: !GetAtt ALB.CanonicalHostedZoneID
+    Description: The host ID of the ALB
+    Export:
+      Name: AlbCanonicalHostedZoneID
